@@ -1,94 +1,120 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using Sensors.DhtCS;
-using Sensors.OneWire.Common;
+using Sensors.Dht;
+//using Sensors.OneWire.Common;
 using Windows.Devices.Gpio;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Navigation;
+using System.Threading;
+using Newtonsoft.Json.Linq;  //Add through Nuget  NewtoSoft.Json
+using System.Threading.Tasks;
 
 namespace Sensors.OneWire
 {
-	public sealed partial class MainPage : BindablePage
+    public sealed class DHT22CS
     {
-        private DispatcherTimer _timer = new DispatcherTimer();
+        //Source: https://www.hackster.io/porrey/dht11-dht22-temperature-sensor-077790
 
+        GpioPin OneWirePin = null;
+        const int DHTPIN = 17;
+        private IDht _dht = null;
         private List<int> _retryCount = new List<int>();
         private DateTimeOffset _startedAt = DateTimeOffset.MinValue;
 
-        private DhtCS.IDhtCS dhtCS;
+        private ReaderWriterLockSlim dhtlock = null;
 
-        public MainPage()
+        public void InitDHT22()
         {
-            this.InitializeComponent();
-            dhtCS = new DhtCS.DhtCS();
+            dhtlock = new ReaderWriterLockSlim();
+            GpioController controller = GpioController.GetDefault();
 
+            if (controller != null)
+            {
+                OneWirePin = GpioController.GetDefault().OpenPin(DHTPIN, GpioSharingMode.Exclusive);
+                _dht = new Dht22(OneWirePin, GpioPinDriveMode.Input);
+                _startedAt = DateTimeOffset.Now;
 
-
+            }
         }
 
-        protected override void OnNavigatedTo(NavigationEventArgs e)
+        public void StopDHT22()
         {
-            base.OnNavigatedTo(e);
-            dhtCS.InitDHT22();
-
-            //Don't start time until the UX is up
-            _timer.Tick += _timer_Tick;
-            _timer.Interval = TimeSpan.FromSeconds(1);
-            _timer.Start();
-        }
-
-        protected override void OnNavigatedFrom(NavigationEventArgs e)
-        {
-            _timer.Stop();
 
             // ***
-            // *** Dispose the hw.
+            // *** Dispose the pin.
             // ***
-            dhtCS.StopDHT22();
-
-
+            if (OneWirePin != null)
+            {
+                OneWirePin.Dispose();
+                OneWirePin = null;
+            }
 
             // ***
             // *** Set the Dht object reference to null.
             // ***
-            dhtCS = null;
+            _dht = null;
 
 
-
-            base.OnNavigatedFrom(e);
         }
 
-        private async void _timer_Tick(object sender, object e)
-
+        public  string GetTempReadingsAsJSon()
         {
+            JObject o = JObject.FromObject(Reading);
+            string json = o.ToString();
+            return json;
+        }
 
 
-            int val = this.TotalAttempts;
-            this.TotalAttempts++;
-
-
-            await dhtCS.ReadTempHumidity();
-            Sensors.Dht.DhtReading reading = dhtCS.Reading;
-
-            _retryCount.Add(reading.RetryCount);
-
-            this.OnPropertyChanged(nameof(AverageRetriesDisplay));
-            this.OnPropertyChanged(nameof(TotalAttempts));
-            this.OnPropertyChanged(nameof(PercentSuccess));
-
-           if (reading.IsValid)
-
+        DhtReading _reading;
+        DhtReading Reading
+        {
+            get
             {
-                this.TotalSuccess++;
-                this.Temperature = Convert.ToSingle(reading.Temperature);
-                this.Humidity = Convert.ToSingle(reading.Humidity);
-                this.LastUpdated = DateTimeOffset.Now;
-                this.OnPropertyChanged(nameof(SuccessRate));
+                dhtlock.EnterReadLock();
+                try
+                {
+                    return _reading;
+                }
+                finally
+                {
+                    dhtlock.ExitReadLock();
+                }
             }
 
-            this.OnPropertyChanged(nameof(LastUpdatedDisplay));
+            set
+            {
+                dhtlock.EnterWriteLock();
+                try
+                {
+                    _reading = value;
+                }
+                finally
+                {
+                    dhtlock.ExitWriteLock();
+                }
+            }
+        }
+         
+        private async Task ReadTempHumidity()
+        {
+            if (dhtlock == null)
+                InitDHT22();
+            Reading  = new DhtReading();
+            int val = this.TotalAttempts;
+            this.TotalAttempts++;
+            
+            Reading = await _dht.GetReadingAsync().AsTask();
 
+            _retryCount.Add(Reading.RetryCount);
+
+            if (Reading.IsValid)
+            {
+                this.TotalSuccess++;
+                this.Temperature = Convert.ToSingle(Reading.Temperature);
+                this.Humidity = Convert.ToSingle(Reading.Humidity);
+                this.LastUpdated = DateTimeOffset.Now;
+            }
         }
 
         public string PercentSuccess
@@ -96,7 +122,9 @@ namespace Sensors.OneWire
             get
             {
                 string returnValue = string.Empty;
+
                 int attempts = this.TotalAttempts;
+
                 if (attempts > 0)
                 {
                     returnValue = string.Format("{0:0.0}%", 100f * (float)this.TotalSuccess / (float)attempts);
@@ -105,6 +133,7 @@ namespace Sensors.OneWire
                 {
                     returnValue = "0.0%";
                 }
+
                 return returnValue;
             }
         }
@@ -116,11 +145,9 @@ namespace Sensors.OneWire
             {
                 return _totalAttempts;
             }
-
             set
             {
-                this.SetProperty(ref _totalAttempts, value);
-                this.OnPropertyChanged(nameof(PercentSuccess));
+                _totalAttempts = value;
             }
         }
 
@@ -133,8 +160,7 @@ namespace Sensors.OneWire
             }
             set
             {
-                this.SetProperty(ref _totalSuccess, value);
-                this.OnPropertyChanged(nameof(PercentSuccess));
+                _totalSuccess = value;
             }
         }
 
@@ -145,10 +171,10 @@ namespace Sensors.OneWire
             {
                 return _humidity;
             }
+
             set
             {
-                this.SetProperty(ref _humidity, value);
-                this.OnPropertyChanged(nameof(HumidityDisplay));
+                _humidity = value;
             }
         }
 
@@ -169,8 +195,7 @@ namespace Sensors.OneWire
             }
             set
             {
-                this.SetProperty(ref _temperature, value);
-                this.OnPropertyChanged(nameof(TemperatureDisplay));
+                _temperature = value;
             }
         }
 
@@ -180,7 +205,6 @@ namespace Sensors.OneWire
             {
                 return string.Format("{0:0.0} °C", this.Temperature);
             }
-
         }
 
         private DateTimeOffset _lastUpdated = DateTimeOffset.MinValue;
@@ -192,8 +216,7 @@ namespace Sensors.OneWire
             }
             set
             {
-                this.SetProperty(ref _lastUpdated, value);
-                this.OnPropertyChanged(nameof(LastUpdatedDisplay));
+                _lastUpdated = value;
             }
         }
 
@@ -202,7 +225,9 @@ namespace Sensors.OneWire
             get
             {
                 string returnValue = string.Empty;
+
                 TimeSpan elapsed = DateTimeOffset.Now.Subtract(this.LastUpdated);
+
                 if (this.LastUpdated == DateTimeOffset.MinValue)
                 {
                     returnValue = "never";
@@ -210,9 +235,9 @@ namespace Sensors.OneWire
                 else if (elapsed.TotalSeconds < 60d)
                 {
                     int seconds = (int)elapsed.TotalSeconds;
-                    if (seconds < 2)
 
-                   {
+                    if (seconds < 2)
+                    {
                         returnValue = "just now";
                     }
                     else
@@ -234,21 +259,22 @@ namespace Sensors.OneWire
                 {
                     returnValue = "a long time ago";
                 }
+
                 return returnValue;
             }
         }
-
-
 
         public int AverageRetries
         {
             get
             {
                 int returnValue = 0;
+
                 if (_retryCount.Count() > 0)
                 {
                     returnValue = (int)_retryCount.Average();
                 }
+
                 return returnValue;
             }
         }
@@ -266,8 +292,10 @@ namespace Sensors.OneWire
             get
             {
                 string returnValue = string.Empty;
+
                 double totalSeconds = DateTimeOffset.Now.Subtract(_startedAt).TotalSeconds;
                 double rate = this.TotalSuccess / totalSeconds;
+
                 if (rate < 1)
                 {
                     returnValue = string.Format("{0:0.00} seconds/reading", 1d / rate);
@@ -276,9 +304,12 @@ namespace Sensors.OneWire
                 {
                     returnValue = string.Format("{0:0.00} readings/sec", rate);
                 }
+
                 return returnValue;
             }
         }
+
+
     }
-   
 }
+
